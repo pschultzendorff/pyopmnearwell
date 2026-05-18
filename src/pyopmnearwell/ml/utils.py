@@ -22,3 +22,22 @@ def enable_determinism(seed: Optional[int] = None):
     # simultaneously.
     tf.keras.utils.set_random_seed(seed=seed)
     tf.config.experimental.enable_op_determinism()
+
+
+def recursive_dict_update(d: dict, u: dict) -> dict:
+    """Recursively update a dictionary with another dictionary.
+
+    Args:
+        d: The dictionary to be updated.
+        u: The dictionary to update with.
+
+    Returns:
+        The updated dictionary.
+
+    """
+    for k, v in u.items():
+        if isinstance(v, dict):
+            d[k] = recursive_dict_update(d.get(k, {}), v)
+        else:
+            d[k] = v
+    return d

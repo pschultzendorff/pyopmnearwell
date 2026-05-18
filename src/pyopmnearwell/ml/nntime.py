@@ -1,7 +1,9 @@
 """Transform ensemble data into datasets and train neural networks."""
+
 from __future__ import annotations
 
 import csv
+import json
 import logging
 import math
 import pathlib
@@ -12,9 +14,11 @@ import keras_tuner
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from pyopmnearwell.ml.kerasify import export_model
 from sklearn.preprocessing import MinMaxScaler
 from tensorflow import keras
+
+from pyopmnearwell.ml.kerasify import export_model
+from pyopmnearwell.ml.utils import recursive_dict_update
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -361,41 +365,44 @@ def scale_and_prepare_dataset(
             )
         )
 
-    with (savepath / "scalings.csv").open("w", newline="", encoding="utf-8") as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=["variable", "min", "max"])
-        writer.writeheader()
-        for feature_name, feature_min, feature_max in zip(
-            feature_names, feature_scaler.data_min_, feature_scaler.data_max_
-        ):
-            writer.writerow(
-                {
-                    "variable": f"input_{feature_name}",
-                    "min": feature_min,
-                    "max": feature_max,
-                }
-            )
-        writer.writerow(
-            {
-                "variable": "output_WI",
-                "min": target_scaler.data_min_[0],
-                "max": target_scaler.data_max_[0],
+    input_block = {}
+    output_block = {}
+
+    for feature_name, feature_min, feature_max in zip(
+        feature_names, feature_scaler.data_min_, feature_scaler.data_max_
+    ):
+        input_block[feature_name] = {
+            "scaling_params": {
+                "min": float(feature_min),
+                "max": float(feature_max),
+                "range_min": feature_range[0],
+                "range_max": feature_range[1],
             }
-        )
-        writer.writerow(
-            {
-                "variable": "feature_range",
-                "min": feature_range[0],
-                "max": feature_range[1],
-            }
-        )
-        writer.writerow(
-            {
-                "variable": "target_range",
-                "min": target_range[0],
-                "max": target_range[1],
-            }
-        )
-    logger.info(f"Saved scalings to {savepath / 'scalings.csv'}")
+        }
+
+    output_block["WI"] = {
+        "scaling_params": {
+            "min": float(target_scaler.data_min_[0]),
+            "max": float(target_scaler.data_max_[0]),
+            "range_min": target_range[0],
+            "range_max": target_range[1],
+        }
+    }
+
+    # Write input and output features to config file for later use in OPM.
+    config_file = savepath / "MLNearWellConfig.json"
+    if not config_file.exists() or config_file.stat().st_size == 0:
+        config = {}
+    else:
+        with config_file.open("r", encoding="utf-8") as f:
+            config = json.load(f)
+
+    with config_file.open("w", encoding="utf-8") as f:
+        update = {"features": {"inputs": input_block, "outputs": output_block}}
+        recursive_dict_update(config, update)
+        json.dump(config, f, indent=4)
+
+    logger.info(f"Saved scalings to {savepath / 'MLNearWellConfig.json'}")
 
     # Split by run/member_id instead of by individual rows.
     # This prevents the same run from ending up in train, val and test.
@@ -435,9 +442,7 @@ def scale_and_prepare_dataset(
     train_ds = tf.data.Dataset.from_tensor_slices(
         (features[train_mask], targets[train_mask])
     )
-    val_ds = tf.data.Dataset.from_tensor_slices(
-        (features[val_mask], targets[val_mask])
-    )
+    val_ds = tf.data.Dataset.from_tensor_slices((features[val_mask], targets[val_mask]))
     test_ds = tf.data.Dataset.from_tensor_slices(
         (features[test_mask], targets[test_mask])
     )
@@ -479,7 +484,7 @@ def scale_and_prepare_dataset(
     assert not (train_members & val_members)
     assert not (train_members & test_members)
     assert not (val_members & test_members)
-################ ENDRET 16.03 #############################################
+    ################ ENDRET 16.03 #############################################
     # Treat the other two shuffle options.
     if shuffle == "last":
         logger.info("Shuffling the dataset (after splitting)")
@@ -505,8 +510,9 @@ def scale_and_prepare_dataset(
             iter(val_ds.batch(batch_size=len(val_ds)).as_numpy_iterator())
         )
     else:
-        val_features, val_targets = np.zeros((1, train_features.shape[-1])), np.zeros(
-            (1, train_targets.shape[-1])
+        val_features, val_targets = (
+            np.zeros((1, train_features.shape[-1])),
+            np.zeros((1, train_targets.shape[-1])),
         )
 
     # Reshape to one-dimensional data.
@@ -817,58 +823,62 @@ def save_tune_results(tuner: keras_tuner.Tuner, savepath: str | pathlib.Path) ->
 def scale_and_evaluate(
     model: keras.Model,
     model_input: ArrayLike,
-    scalingsfile: str | pathlib.Path,
+    configfile: str | pathlib.Path,
 ) -> tf.Tensor:
     """Scale the input, evaluate with the model and scale the output.
 
     Args:
         model (tf.keras.Model): A Keras model to evaluate the input with.
         model_input (ArrayLike): Input tensor. Can be a batch.
-        scalingsfile (str | pathlib.Path): The path to the CSV file containing the
-            scaling parameters for MinMaxScaling.
+        configfile (str | pathlib.Path): The path to the JSON file containing the
+            model configuration, including the scaling parameters.
 
     Returns:
         tf.Tensor: The model's output, scaled back to the original range.
 
     Raises:
-        FileNotFoundError: If ``scalingsfile`` does not exist.
-        ValueError: If ``scalingsfile`` contains an invalid row.
+        FileNotFoundError: If ``configfile`` does not exist.
 
     """
     # Ensure ``ensemble_path`` is a ``Path`` object.
-    scalingsfile = pathlib.Path(scalingsfile)
+    configfile = pathlib.Path(configfile)
 
     # Get the feature and target scaling.
     feature_min: list[float] = []
     feature_max: list[float] = []
     target_min: list[float] = []
     target_max: list[float] = []
-    feature_range: list[float] = [-1.0, 1.0]
-    target_range: list[float] = [-1.0, 1.0]
-    with scalingsfile.open("r", encoding="utf-8") as csvfile:
-        reader = csv.DictReader(csvfile, fieldnames=["variable", "min", "max"])
+    feature_range: list[float] = []
+    target_range: list[float] = []
 
-        # Skip the header
-        next(reader)
+    with configfile.open("r", encoding="utf-8") as f:
+        config = json.load(f)
 
-        for row in reader:
-            if row["variable"].startswith("output"):
-                target_min.append(float(row["min"]))
-                target_max.append(float(row["max"]))
-            elif row["variable"].startswith("input"):
-                feature_min.append(float(row["min"]))
-                feature_max.append(float(row["max"]))
-            elif row["variable"] == "feature_range":
-                feature_range[0] = float(row["min"])
-                feature_range[1] = float(row["max"])
-            elif row["variable"] == "target_range":
-                target_range[0] = float(row["min"])
-                target_range[1] = float(row["max"])
-            else:
-                raise ValueError("Name of scaling variable is invalid.")
+    for i, feature in enumerate(config["features"]["inputs"].values()):
+        feature_min.append(float(feature["scaling_params"]["min"]))
+        feature_max.append(float(feature["scaling_params"]["max"]))
+
+        # Range min/max is identical for all features.
+        if i == 0:
+            feature_range.append(float(feature["scaling_params"]["range_min"]))
+            feature_range.append(float(feature["scaling_params"]["range_max"]))
+
+    target_min.append(
+        float(config["features"]["outputs"]["WI"]["scaling_params"]["min"])
+    )
+    target_max.append(
+        float(config["features"]["outputs"]["WI"]["scaling_params"]["max"])
+    )
+
+    target_range.append(
+        float(config["features"]["outputs"]["WI"]["scaling_params"]["range_min"])
+    )
+    target_range.append(
+        float(config["features"]["outputs"]["WI"]["scaling_params"]["range_max"])
+    )
 
     # Create MinMaxScalers and manually set the parameters.
-    feature_scaler: MinMaxScaler = MinMaxScaler(feature_range)
+    feature_scaler: MinMaxScaler = MinMaxScaler(feature_range=feature_range)
     feature_scaler.data_min_ = np.array(feature_min)
     feature_scaler.data_max_ = np.array(feature_max)
     feature_scaler.scale_ = (
@@ -877,7 +887,7 @@ def scale_and_evaluate(
     feature_scaler.min_ = (
         feature_range[0] - feature_scaler.data_min_ * feature_scaler.scale_
     )
-    target_scaler: MinMaxScaler = MinMaxScaler(target_range)
+    target_scaler: MinMaxScaler = MinMaxScaler(feature_range=target_range)
     target_scaler.data_min_ = np.array(target_min)
     target_scaler.data_max_ = np.array(target_max)
     target_scaler.scale_ = (target_range[1] - target_range[0]) / handle_zeros_in_scale(
@@ -1049,7 +1059,7 @@ def restructure_data(
     y = targets.reshape(-1)
     valid = np.isfinite(y)
     if trainspecs["WI_log"]:
-        valid &= (y > 0)
+        valid &= y > 0
         y_safe = np.where(valid, y, 1.0)
         y_out = np.log10(np.maximum(y_safe, eps))
     else:
@@ -1083,7 +1093,9 @@ def restructure_data(
     new_data_dirname = pathlib.Path(new_data_dirname)
     new_data_dirname.mkdir(parents=True, exist_ok=True)
 
-    with (new_data_dirname / "row_to_run_map.csv").open("w", newline="", encoding="utf-8") as f:
+    with (new_data_dirname / "row_to_run_map.csv").open(
+        "w", newline="", encoding="utf-8"
+    ) as f:
         writer = csv.writer(f)
         writer.writerow(["row_idx", "member_id", "time_id", "layer_id", "x_id"])
         for i, m, t, l, x in zip(

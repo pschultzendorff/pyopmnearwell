@@ -17,6 +17,7 @@ from sklearn.preprocessing import MinMaxScaler
 from tensorflow import keras
 
 from pyopmnearwell.ml.kerasify import export_model
+from pyopmnearwell.ml.utils import recursive_dict_update
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -378,13 +379,20 @@ def scale_and_prepare_dataset(
         feature_names, feature_scaler.data_min_, feature_scaler.data_max_
     ):
         input_block[feature_name] = {
-            "scaling_params": {"min": feature_min, "max": feature_max}
+            "scaling_params": {
+                "min": float(feature_min),
+                "max": float(feature_max),
+                "range_min": float(feature_range[0]),
+                "range_max": float(feature_range[1]),
+            },
         }
 
     output_block["WI"] = {
         "scaling_params": {
-            "min": target_scaler.data_min_[0],
-            "max": target_scaler.data_max_[0],
+            "min": float(target_scaler.data_min_[0]),
+            "max": float(target_scaler.data_max_[0]),
+            "range_min": float(target_range[0]),
+            "range_max": float(target_range[1]),
         }
     }
 
@@ -397,7 +405,8 @@ def scale_and_prepare_dataset(
             config = json.load(f)
 
     with config_file.open("w", encoding="utf-8") as f:
-        config["features"] = {"inputs": input_block, "outputs": output_block}
+        update = {"features": {"inputs": input_block, "outputs": output_block}}
+        recursive_dict_update(config, update)
         json.dump(config, f, indent=4)
 
     logger.info(f"Saved scalings to {savepath / 'MLNearWellConfig.json'}")
@@ -423,8 +432,6 @@ def scale_and_prepare_dataset(
     test_ds = ds.skip(train_size).skip(val_size)
     ################ ENDRET 16.03 #############################################
 
-    
-
     map_file = pathlib.Path(dsfile) / "row_to_run_map.csv"
     if map_file.exists():
         with map_file.open("r", newline="", encoding="utf-8") as f:
@@ -446,7 +453,8 @@ def scale_and_prepare_dataset(
         def write_split_rows_csv(rows, outpath):
             with outpath.open("w", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(
-                    f, fieldnames=["row_idx", "member_id", "time_id", "layer_id", "x_id"]
+                    f,
+                    fieldnames=["row_idx", "member_id", "time_id", "layer_id", "x_id"],
                 )
                 writer.writeheader()
                 writer.writerows(rows)
@@ -460,8 +468,7 @@ def scale_and_prepare_dataset(
         write_split_rows_csv(train_rows, savepath / "train_rows.csv")
         write_split_rows_csv(val_rows, savepath / "val_rows.csv")
         write_split_rows_csv(test_rows, savepath / "test_rows.csv")
-        
-        
+
         train_members = {int(r["member_id"]) for r in train_rows}
         val_members = {int(r["member_id"]) for r in val_rows}
         test_members = {int(r["member_id"]) for r in test_rows}
@@ -475,7 +482,7 @@ def scale_and_prepare_dataset(
             print("train ∩ val :", sorted(overlap_train_val))
             print("train ∩ test:", sorted(overlap_train_test))
             print("val ∩ test  :", sorted(overlap_val_test))
-################ ENDRET 16.03 #############################################
+    ################ ENDRET 16.03 #############################################
     # Treat the other two shuffle options.
     if shuffle == "last":
         logger.info("Shuffling the dataset (after splitting)")
@@ -1045,7 +1052,7 @@ def restructure_data(
     y = targets.reshape(-1)
     valid = np.isfinite(y)
     if trainspecs["WI_log"]:
-        valid &= (y > 0)
+        valid &= y > 0
         y_safe = np.where(valid, y, 1.0)
         y_out = np.log10(np.maximum(y_safe, eps))
     else:
@@ -1079,7 +1086,9 @@ def restructure_data(
     new_data_dirname = pathlib.Path(new_data_dirname)
     new_data_dirname.mkdir(parents=True, exist_ok=True)
 
-    with (new_data_dirname / "row_to_run_map.csv").open("w", newline="", encoding="utf-8") as f:
+    with (new_data_dirname / "row_to_run_map.csv").open(
+        "w", newline="", encoding="utf-8"
+    ) as f:
         writer = csv.writer(f)
         writer.writerow(["row_idx", "member_id", "time_id", "layer_id", "x_id"])
         for i, m, t, l, x in zip(
