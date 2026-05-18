@@ -9,9 +9,10 @@ import copy
 import csv
 import logging
 import math
-import os
 import pathlib
+import shlex
 import shutil
+import subprocess
 from collections import OrderedDict
 from typing import Any, Optional
 
@@ -22,9 +23,6 @@ from mako.template import Template
 from resdata import FileMode
 from resdata.resfile import ResdataFile
 from resdata.summary import Summary
-
-import subprocess
-import shlex
 
 from pyopmnearwell.utils.formulas import area_squaredcircle, pyopmnearwell_correction
 from pyopmnearwell.utils.inputvalues import readthefirstpart, readthesecondpart
@@ -486,7 +484,9 @@ def run_ensemble(
     if not run_ids:
         raise RuntimeError(f"Ingen runfiles_* funnet i {ensemble_path}")
 
-    logger.info(f"Found {len(run_ids)} runfiles directories: {run_ids[0]}..{run_ids[-1]}")
+    logger.info(
+        f"Found {len(run_ids)} runfiles directories: {run_ids[0]}..{run_ids[-1]}"
+    )
 
     batch_size = runspecs["npruns"]
     flags = shlex.split(kwargs.get("flags", ""))
@@ -507,7 +507,12 @@ def run_ensemble(
             results_dir = ensemble_path / f"results_{j}"
             results_dir.mkdir(parents=True, exist_ok=True)
 
-            cmd = [str(flow_path), str(data_file), f"--output-dir={results_dir}", *flags]
+            cmd = [
+                str(flow_path),
+                str(data_file),
+                f"--output-dir={results_dir}",
+                *flags,
+            ]
             procs[j] = subprocess.Popen(cmd)
 
         for j, proc in procs.items():
@@ -643,6 +648,15 @@ def run_ensemble(
     else:
         data["__saved_chunks__"] = False
 
+    # Add metadata for intermediate data.
+    if save_intermediate_data:
+        data = {
+            "__saved_chunks_dir__": str(intermediate_data_dir),
+            "__saved_chunks__": True,
+        }
+    else:
+        data["__saved_chunks__"] = False
+
     return data
 
 
@@ -745,7 +759,7 @@ def calculate_WI(
     if isinstance(injection_rates, float):
         injection_rates = np.full((pressures.shape[0],), injection_rates)
 
-    for i, (member_pressure, member_injection_rate) in enumerate(
+    for i, (member_pressure, member_injection_rate) in enumerate(  # type: ignore
         zip(pressures, injection_rates)  # type: ignore
     ):
         p_w = member_pressure[
