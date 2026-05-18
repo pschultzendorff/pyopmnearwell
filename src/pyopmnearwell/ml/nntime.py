@@ -669,7 +669,18 @@ def train(
     model.load_weights(savepath / "bestmodel")
     model.save(savepath / "bestmodel.keras")
     if kerasify:
+        # Save model and write filename to model config
         export_model(model, savepath / "WI.model")
+        with (savepath / "MLNearWellConfig.json").open(
+            "r", newline="", encoding="utf-8"
+        ) as f:
+            config = json.load(f)
+            config["model_path"] = str(savepath / "WI.model")
+            json.dump(
+                config,
+                (savepath / "MLNearWellConfig.json").open("w", encoding="utf-8"),
+                indent=4,
+            )
 
 
 def build_model(
